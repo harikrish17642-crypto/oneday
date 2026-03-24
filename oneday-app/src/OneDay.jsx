@@ -74,6 +74,7 @@ const SOURCES = [
   { id:"all",       label:"All",        color:B.sage,      icon:Globe },
   { id:"linkedin",  label:"LinkedIn",   color:B.linkedin,  icon:Building2 },
   { id:"naukri",    label:"Naukri",      color:B.naukri,    icon:Building2 },
+  { id:"indeed",    label:"Indeed",      color:B.indeed,    icon:Globe },
   { id:"remotive",  label:"Remotive",    color:B.remotive,  icon:Globe },
   { id:"arbeitnow", label:"Arbeitnow",  color:B.arbeitnow, icon:Globe },
   { id:"remoteok",  label:"RemoteOK",   color:B.remoteok,  icon:Zap },
@@ -105,8 +106,6 @@ const SEARCH_MSGS = [
 ];
 
 /* ═══════════════════════════════════════════════════════════ */
-const PROXY = "https://api.allorigins.win/raw?url=";
-
 function timeAgo(ds) {
   if (!ds) return "";
   const d = new Date(ds);
@@ -119,6 +118,34 @@ function timeAgo(ds) {
   if (s < 2592000) return `${Math.floor(s/604800)}w ago`;
   return d.toLocaleDateString("en-IN",{day:"numeric",month:"short"});
 }
+function strip(h){return h?h.replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().substring(0,300):"";}
+
+/* ── Fetch jobs from Vercel serverless function ──────────── */
+async function fetchJobs(role, locations) {
+  const allJobs = [];
+  // If multiple locations, run a search per location + one without location
+  const searchLocs = locations.length > 0 ? [...locations] : [""];
+  
+  const fetches = searchLocs.map(async (loc) => {
+    try {
+      const params = new URLSearchParams({ role });
+      if (loc) params.set("location", loc.split(",")[0].trim());
+      const res = await fetch(`/api/jobs?${params}`);
+      if (!res.ok) throw new Error(`API ${res.status}`);
+      const data = await res.json();
+      return data.jobs || [];
+    } catch (e) {
+      console.warn("API fetch failed for", loc, e);
+      return [];
+    }
+  });
+
+  const results = await Promise.allSettled(fetches);
+  for (const r of results) {
+    if (r.status === "fulfilled") allJobs.push(...r.value);
+  }
+  return allJobs;
+}
 function dateSort(a,b){return new Date(b.date||0)-new Date(a.date||0);}
 function matchesExp(j,e){
   if(!e)return true;
@@ -130,12 +157,6 @@ function matchesExp(j,e){
   if(e==="10+")return/10\+|lead|principal|director|head|architect|staff/i.test(t);
   return true;
 }
-function strip(h){return h?h.replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().substring(0,300):"";}
-
-/* ── API ──────────────────────────────────────────────────── */
-async function fetchRemotive(q){try{const r=await fetch(`${PROXY}${encodeURIComponent(`https://remotive.com/api/remote-jobs?search=${encodeURIComponent(q)}&limit=100`)}`);const d=await r.json();return(d.jobs||[]).map(j=>({id:`rem-${j.id}`,title:j.title||"",company:j.company_name||"",location:j.candidate_required_location||"Remote",date:j.publication_date||"",url:j.url||"",source:"remotive",sourceLabel:"Remotive",description:strip(j.description),salary:j.salary||"",experience:""}));}catch{return[];}}
-async function fetchArbeitnow(q){try{const r=await fetch(`${PROXY}${encodeURIComponent(`https://www.arbeitnow.com/api/job-board-api?search=${encodeURIComponent(q)}`)}`);const d=await r.json();return(d.data||[]).map(j=>({id:`arb-${j.slug}`,title:j.title||"",company:j.company_name||"",location:j.location||"Remote",date:j.created_at?new Date(j.created_at*1000).toISOString():"",url:j.url||"",source:"arbeitnow",sourceLabel:"Arbeitnow",description:strip(j.description),salary:"",experience:""}));}catch{return[];}}
-async function fetchRemoteOK(q){try{const r=await fetch(`${PROXY}${encodeURIComponent("https://remoteok.com/api")}`);const d=await r.json();const ql=q.toLowerCase();return d.filter(j=>j.position&&`${j.position} ${j.company} ${j.description||""} ${(j.tags||[]).join(" ")}`.toLowerCase().split(/\s+/).some(w=>ql.includes(w)||w.includes(ql.split(/\s+/)[0]))).slice(0,80).map(j=>({id:`rok-${j.id}`,title:j.position||"",company:j.company||"",location:j.location||"Remote",date:j.date||"",url:j.url||`https://remoteok.com/remote-jobs/${j.id}`,source:"remoteok",sourceLabel:"RemoteOK",description:strip(j.description),salary:j.salary_min?`$${j.salary_min}–${j.salary_max}`:"",experience:""}));}catch{return[];}}
 
 /* ── URLs ─────────────────────────────────────────────────── */
 function linkedinURL(r,l){return`https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(r)}&location=${encodeURIComponent(l||"")}&f_TPR=r604800&sortBy=DD`;}
@@ -351,11 +372,11 @@ export default function OneDay(){
 
   const handleSearch=useCallback(async()=>{
     if(!role.trim())return;setLoading(true);setSearched(true);setJobs([]);setSearchMsg(0);
-    const[r1,r2,r3]=await Promise.allSettled([fetchRemotive(role.trim()),fetchArbeitnow(role.trim()),fetchRemoteOK(role.trim())]);
-    let all=[...(r1.status==="fulfilled"?r1.value:[]),...(r2.status==="fulfilled"?r2.value:[]),...(r3.status==="fulfilled"?r3.value:[])];
+    let all = await fetchJobs(role.trim(), locations);
     if(experience)all=all.filter(j=>matchesExp(j,experience));
-    if(locations.length>0){const lt=locations.map(l=>l.toLowerCase().split(",")[0].trim());const wl=all.filter(j=>{const jl=j.location.toLowerCase();return lt.some(t=>jl.includes(t)||(t==="remote"&&/remote|worldwide|anywhere/i.test(jl)));});if(wl.length>all.length*0.03)all=wl;}
-    all=_.uniqBy(all,j=>`${j.title.toLowerCase()}::${j.company.toLowerCase()}`);all.sort(dateSort);setJobs(all);setLoading(false);
+    all=_.uniqBy(all,j=>`${j.title.toLowerCase()}::${j.company.toLowerCase()}`);
+    all.sort(dateSort);
+    setJobs(all);setLoading(false);
   },[role,locations,experience]);
 
   const filtered=useMemo(()=>{let l=activeSource==="all"?jobs:jobs.filter(j=>j.source===activeSource);if(sortBy==="date")l=[...l].sort(dateSort);else if(sortBy==="company")l=[...l].sort((a,b)=>a.company.localeCompare(b.company));else if(sortBy==="title")l=[...l].sort((a,b)=>a.title.localeCompare(b.title));return l;},[jobs,activeSource,sortBy]);
@@ -597,7 +618,7 @@ export default function OneDay(){
             <span style={{fontSize:11.5,color:B.textDim,letterSpacing:"1.5px",textTransform:"uppercase",fontWeight:500}}>HKCreations</span>
           </div>
           <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:14,color:B.textMuted,fontStyle:"italic"}}>Built with purpose. Made for dreamers.</p>
-          <p style={{fontSize:10.5,color:B.textMuted,marginTop:6,letterSpacing:".5px",opacity:.6}}>idea credits — KS</p>
+          <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:B.textMuted,marginTop:6,fontStyle:"italic",opacity:.5,letterSpacing:".3px"}}>idea credits — KS</p>
         </div>
       </footer>
     </div>
