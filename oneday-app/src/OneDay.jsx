@@ -74,8 +74,6 @@ const SOURCES = [
   { id:"all",       label:"All",        color:B.sage,      icon:Globe },
   { id:"linkedin",  label:"LinkedIn",   color:B.linkedin,  icon:Building2 },
   { id:"naukri",    label:"Naukri",      color:B.naukri,    icon:Building2 },
-  { id:"indeed",    label:"Indeed",      color:B.indeed,    icon:Globe },
-  { id:"findwork",  label:"Findwork",   color:B.glassdoor, icon:Globe },
   { id:"remotive",  label:"Remotive",    color:B.remotive,  icon:Globe },
   { id:"arbeitnow", label:"Arbeitnow",  color:B.arbeitnow, icon:Globe },
   { id:"remoteok",  label:"RemoteOK",   color:B.remoteok,  icon:Zap },
@@ -107,6 +105,8 @@ const SEARCH_MSGS = [
 ];
 
 /* ═══════════════════════════════════════════════════════════ */
+const PROXY = "https://api.allorigins.win/raw?url=";
+
 function timeAgo(ds) {
   if (!ds) return "";
   const d = new Date(ds);
@@ -119,69 +119,6 @@ function timeAgo(ds) {
   if (s < 2592000) return `${Math.floor(s/604800)}w ago`;
   return d.toLocaleDateString("en-IN",{day:"numeric",month:"short"});
 }
-function strip(h){return h?h.replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().substring(0,300):"";}
-
-/* ── Browser-side API fetchers (always work, no server needed) ── */
-const CP = "https://api.allorigins.win/raw?url=";
-
-async function browserRemotive(q){
-  try{const r=await fetch(`${CP}${encodeURIComponent(`https://remotive.com/api/remote-jobs?search=${encodeURIComponent(q)}&limit=100`)}`);
-  const d=await r.json();return(d.jobs||[]).map(j=>({id:`rem-${j.id}`,title:j.title||"",company:j.company_name||"",location:j.candidate_required_location||"Remote",date:j.publication_date||"",url:j.url||"",source:"remotive",sourceLabel:"Remotive",description:strip(j.description),salary:j.salary||"",experience:""}));}catch{return[];}}
-
-async function browserArbeitnow(q){
-  try{const r=await fetch(`${CP}${encodeURIComponent(`https://www.arbeitnow.com/api/job-board-api?search=${encodeURIComponent(q)}`)}`);
-  const d=await r.json();return(d.data||[]).map(j=>({id:`arb-${j.slug}`,title:j.title||"",company:j.company_name||"",location:j.location||"Remote",date:j.created_at?new Date(j.created_at*1000).toISOString():"",url:j.url||"",source:"arbeitnow",sourceLabel:"Arbeitnow",description:strip(j.description),salary:"",experience:""}));}catch{return[];}}
-
-async function browserRemoteOK(q){
-  try{const r=await fetch(`${CP}${encodeURIComponent("https://remoteok.com/api")}`);
-  const d=await r.json();const words=q.toLowerCase().split(/\s+/);
-  return d.filter(j=>j.position&&words.some(w=>`${j.position} ${j.company} ${(j.tags||[]).join(" ")}`.toLowerCase().includes(w))).slice(0,80).map(j=>({id:`rok-${j.id}`,title:j.position||"",company:j.company||"",location:j.location||"Remote",date:j.date||"",url:j.url||`https://remoteok.com/remote-jobs/${j.id}`,source:"remoteok",sourceLabel:"RemoteOK",description:strip(j.description),salary:j.salary_min?`$${j.salary_min}–${j.salary_max}`:"",experience:""}));}catch{return[];}}
-
-async function browserFindwork(q){
-  try{const r=await fetch(`${CP}${encodeURIComponent(`https://findwork.dev/api/jobs/?search=${encodeURIComponent(q)}&sort_by=date`)}`);
-  const d=await r.json();return(d.results||[]).map((j,i)=>({id:`fw-${i}`,title:j.role||"",company:j.company_name||"",location:j.location||"Remote",date:j.date_posted||"",url:j.url||"",source:"findwork",sourceLabel:"Findwork",description:strip(j.text||""),salary:"",experience:""}));}catch{return[];}}
-
-/* ── Server-side fetch (Vercel function — Naukri, Indeed, LinkedIn) ── */
-async function serverFetch(role, location){
-  try{
-    const p=new URLSearchParams({role});
-    if(location)p.set("location",location.split(",")[0].trim());
-    const r=await fetch(`/api/jobs?${p}`,{signal:AbortSignal.timeout(50000)});
-    if(!r.ok)throw new Error(r.status);
-    const d=await r.json();return d.jobs||[];
-  }catch(e){console.warn("Server API failed:",e);return[];}
-}
-
-/* ── Combined fetcher: server + browser in parallel ────────── */
-async function fetchAllJobs(role, locations, onPartial) {
-  const allJobs = [];
-  const seen = new Set();
-  const addJobs = (newJobs) => {
-    const fresh = [];
-    for(const j of newJobs){
-      const k=`${j.title.toLowerCase().trim()}::${j.company.toLowerCase().trim()}`;
-      if(!seen.has(k)){seen.add(k);fresh.push(j);allJobs.push(j);}
-    }
-    if(fresh.length>0) onPartial([...allJobs].sort((a,b)=>new Date(b.date||0)-new Date(a.date||0)));
-  };
-
-  // 1. Fire ALL browser APIs immediately (fast, always works)
-  const browserPromises = [
-    browserRemotive(role).then(addJobs),
-    browserArbeitnow(role).then(addJobs),
-    browserRemoteOK(role).then(addJobs),
-    browserFindwork(role).then(addJobs),
-  ];
-
-  // 2. Fire server-side scraper per location (Naukri, Indeed, LinkedIn)
-  const locs = locations.length > 0 ? locations : [""];
-  const serverPromises = locs.map(loc => serverFetch(role, loc).then(addJobs));
-
-  // Wait for everything
-  await Promise.allSettled([...browserPromises, ...serverPromises]);
-
-  return allJobs.sort((a,b)=>new Date(b.date||0)-new Date(a.date||0));
-}
 function dateSort(a,b){return new Date(b.date||0)-new Date(a.date||0);}
 function matchesExp(j,e){
   if(!e)return true;
@@ -193,6 +130,12 @@ function matchesExp(j,e){
   if(e==="10+")return/10\+|lead|principal|director|head|architect|staff/i.test(t);
   return true;
 }
+function strip(h){return h?h.replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().substring(0,300):"";}
+
+/* ── API ──────────────────────────────────────────────────── */
+async function fetchRemotive(q){try{const r=await fetch(`${PROXY}${encodeURIComponent(`https://remotive.com/api/remote-jobs?search=${encodeURIComponent(q)}&limit=100`)}`);const d=await r.json();return(d.jobs||[]).map(j=>({id:`rem-${j.id}`,title:j.title||"",company:j.company_name||"",location:j.candidate_required_location||"Remote",date:j.publication_date||"",url:j.url||"",source:"remotive",sourceLabel:"Remotive",description:strip(j.description),salary:j.salary||"",experience:""}));}catch{return[];}}
+async function fetchArbeitnow(q){try{const r=await fetch(`${PROXY}${encodeURIComponent(`https://www.arbeitnow.com/api/job-board-api?search=${encodeURIComponent(q)}`)}`);const d=await r.json();return(d.data||[]).map(j=>({id:`arb-${j.slug}`,title:j.title||"",company:j.company_name||"",location:j.location||"Remote",date:j.created_at?new Date(j.created_at*1000).toISOString():"",url:j.url||"",source:"arbeitnow",sourceLabel:"Arbeitnow",description:strip(j.description),salary:"",experience:""}));}catch{return[];}}
+async function fetchRemoteOK(q){try{const r=await fetch(`${PROXY}${encodeURIComponent("https://remoteok.com/api")}`);const d=await r.json();const ql=q.toLowerCase();return d.filter(j=>j.position&&`${j.position} ${j.company} ${j.description||""} ${(j.tags||[]).join(" ")}`.toLowerCase().split(/\s+/).some(w=>ql.includes(w)||w.includes(ql.split(/\s+/)[0]))).slice(0,80).map(j=>({id:`rok-${j.id}`,title:j.position||"",company:j.company||"",location:j.location||"Remote",date:j.date||"",url:j.url||`https://remoteok.com/remote-jobs/${j.id}`,source:"remoteok",sourceLabel:"RemoteOK",description:strip(j.description),salary:j.salary_min?`$${j.salary_min}–${j.salary_max}`:"",experience:""}));}catch{return[];}}
 
 /* ── URLs ─────────────────────────────────────────────────── */
 function linkedinURL(r,l){return`https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(r)}&location=${encodeURIComponent(l||"")}&f_TPR=r604800&sortBy=DD`;}
@@ -408,12 +351,11 @@ export default function OneDay(){
 
   const handleSearch=useCallback(async()=>{
     if(!role.trim())return;setLoading(true);setSearched(true);setJobs([]);setSearchMsg(0);
-    await fetchAllJobs(role.trim(), locations, (partial)=>{
-      let filtered = partial;
-      if(experience) filtered = filtered.filter(j=>matchesExp(j,experience));
-      setJobs(filtered);
-    });
-    setLoading(false);
+    const[r1,r2,r3]=await Promise.allSettled([fetchRemotive(role.trim()),fetchArbeitnow(role.trim()),fetchRemoteOK(role.trim())]);
+    let all=[...(r1.status==="fulfilled"?r1.value:[]),...(r2.status==="fulfilled"?r2.value:[]),...(r3.status==="fulfilled"?r3.value:[])];
+    if(experience)all=all.filter(j=>matchesExp(j,experience));
+    if(locations.length>0){const lt=locations.map(l=>l.toLowerCase().split(",")[0].trim());const wl=all.filter(j=>{const jl=j.location.toLowerCase();return lt.some(t=>jl.includes(t)||(t==="remote"&&/remote|worldwide|anywhere/i.test(jl)));});if(wl.length>all.length*0.03)all=wl;}
+    all=_.uniqBy(all,j=>`${j.title.toLowerCase()}::${j.company.toLowerCase()}`);all.sort(dateSort);setJobs(all);setLoading(false);
   },[role,locations,experience]);
 
   const filtered=useMemo(()=>{let l=activeSource==="all"?jobs:jobs.filter(j=>j.source===activeSource);if(sortBy==="date")l=[...l].sort(dateSort);else if(sortBy==="company")l=[...l].sort((a,b)=>a.company.localeCompare(b.company));else if(sortBy==="title")l=[...l].sort((a,b)=>a.title.localeCompare(b.title));return l;},[jobs,activeSource,sortBy]);
@@ -515,7 +457,7 @@ export default function OneDay(){
         {searched&&role.trim()&&<DirectPanel role={role} locations={locations} experience={experience}/>}
 
         {/* Filters */}
-        {searched&&jobs.length>0&&(
+        {searched&&!loading&&jobs.length>0&&(
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:14,marginBottom:18,flexWrap:"wrap",animation:"fadeUp .3s ease both"}}>
             <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
               <SlidersHorizontal size={13} color={B.textDim} style={{marginRight:4}}/>
@@ -569,22 +511,18 @@ export default function OneDay(){
             <span style={{fontSize:13,color:B.textSec}}><strong style={{color:B.text}}>{filtered.length}</strong> openings found{activeSource!=="all"&&` on ${SOURCES.find(s=>s.id===activeSource)?.label}`}</span>
           </div>
         )}
-        {loading&&jobs.length===0&&(
-          <div style={{textAlign:"center",padding:"60px 20px",animation:"fadeUp .3s ease"}}>
+
+        {/* Loading */}
+        {loading&&(
+          <div style={{textAlign:"center",padding:"80px 20px",animation:"fadeUp .3s ease"}}>
             <div style={{width:60,height:60,borderRadius:16,background:B.sageMist,border:`1px solid ${B.sageBorder}`,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 20px",animation:"gentlePulse 2.5s ease infinite"}}>
               <Coffee size={26} color={B.sage} style={{animation:"spin 3s linear infinite"}}/>
             </div>
             <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:20,fontWeight:500,color:B.text,marginBottom:6,fontStyle:"italic"}}>{SEARCH_MSGS[searchMsg]}</p>
-            <p style={{fontSize:12.5,color:B.textDim}}>Searching Naukri, LinkedIn, Indeed & more…</p>
+            <p style={{fontSize:12.5,color:B.textDim}}>Brewing results from multiple platforms</p>
             <div style={{display:"flex",gap:6,justifyContent:"center",marginTop:22}}>
               {[0,1,2,3].map(i=>(<div key={i} style={{width:36,height:3,borderRadius:2,background:i<=searchMsg?B.sage:B.textMuted+"40",transition:"background .4s"}}/>))}
             </div>
-          </div>
-        )}
-        {loading&&jobs.length>0&&(
-          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,padding:"10px 16px",borderRadius:B.radiusSm,background:B.sageMist,border:`1px solid ${B.sageBorder}`,animation:"fadeUp .2s ease"}}>
-            <Loader2 size={15} color={B.sage} style={{animation:"spin .8s linear infinite"}}/>
-            <span style={{fontSize:13,color:B.sage,fontWeight:600}}>Found {jobs.length} so far — still searching more platforms…</span>
           </div>
         )}
 
@@ -592,8 +530,8 @@ export default function OneDay(){
         {!loading&&searched&&filtered.length===0&&(
           <div style={{textAlign:"center",padding:"70px 20px",animation:"fadeUp .3s ease"}}>
             <div style={{width:60,height:60,borderRadius:16,background:B.bgWarm,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 18px"}}><Search size={24} color={B.textDim}/></div>
-            <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:20,fontWeight:500,color:B.text,marginBottom:6}}>No inline results found</p>
-            <p style={{fontSize:13.5,color:B.textDim,maxWidth:400,margin:"0 auto",lineHeight:1.6}}>Click the LinkedIn and Naukri buttons above — they'll open pre-searched results sorted by newest, directly on those platforms.</p>
+            <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:20,fontWeight:500,color:B.text,marginBottom:6}}>Nothing here yet</p>
+            <p style={{fontSize:13.5,color:B.textDim,maxWidth:400,margin:"0 auto",lineHeight:1.6}}>Use the direct platform links above — LinkedIn and Naukri often have the richest results. Broadening your keywords also helps.</p>
           </div>
         )}
 
@@ -659,7 +597,7 @@ export default function OneDay(){
             <span style={{fontSize:11.5,color:B.textDim,letterSpacing:"1.5px",textTransform:"uppercase",fontWeight:500}}>HKCreations</span>
           </div>
           <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:14,color:B.textMuted,fontStyle:"italic"}}>Built with purpose. Made for dreamers.</p>
-          <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:B.textMuted,marginTop:6,fontStyle:"italic",opacity:.5,letterSpacing:".3px"}}>idea credits — KS</p>
+          <p style={{fontSize:10.5,color:B.textMuted,marginTop:6,letterSpacing:".5px",opacity:.6}}>idea credits — KS</p>
         </div>
       </footer>
     </div>
